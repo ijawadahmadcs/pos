@@ -1,3 +1,6 @@
+//javac -cp "libs/mysql-connector-j-9.5.0.jar" -d out code\*.java
+//java -cp "out;libs/mysql-connector-j-9.5.0.jar" POSApplication
+
 // POSApplication.java
 import javax.swing.*;
 import javax.swing.border.LineBorder;
