@@ -7,16 +7,113 @@ public class DatabaseManager {
     private Connection conn;
     
     // Update these with your database credentials
-    private static final String URL = "jdbc:mysql://localhost:3306/pos_system";
+    private static final String DB_NAME = "pos_system";
+    private static final String URL = "jdbc:mysql://localhost:3306/"; // connect to server first
     private static final String USER = "root";
     private static final String PASSWORD = "Pakistan@2025";
 
     public DatabaseManager() {
         try {
-            conn = DriverManager.getConnection(URL, USER, PASSWORD);
-            System.out.println("Database connected successfully!");
+            // Connect to server (no database) so we can create the database if needed
+            Connection serverConn = DriverManager.getConnection(URL, USER, PASSWORD);
+
+            try (Statement s = serverConn.createStatement()) {
+                s.executeUpdate("CREATE DATABASE IF NOT EXISTS " + DB_NAME + " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
+            }
+            serverConn.close();
+
+            // Connect to the specific database
+            conn = DriverManager.getConnection(URL + DB_NAME + "?serverTimezone=UTC", USER, PASSWORD);
+            System.out.println("Database connected successfully to '" + DB_NAME + "'!");
+
+            // Ensure tables exist and seed minimal data
+            createTables();
         } catch (SQLException e) {
             System.out.println("Database connection failed: " + e.getMessage());
+        }
+    }
+
+    /** Create required tables if they don't exist and seed a default admin user */
+    private void createTables() {
+        String users = "CREATE TABLE IF NOT EXISTS Users (" +
+                       "user_id INT AUTO_INCREMENT PRIMARY KEY, " +
+                       "username VARCHAR(100) NOT NULL UNIQUE, " +
+                       "password VARCHAR(100) NOT NULL, " +
+                       "role ENUM('Admin','Cashier') NOT NULL" +
+                       ") ENGINE=InnoDB";
+
+        String categories = "CREATE TABLE IF NOT EXISTS Categories (" +
+                            "category_id INT AUTO_INCREMENT PRIMARY KEY, " +
+                            "name VARCHAR(100) NOT NULL" +
+                            ") ENGINE=InnoDB";
+
+        String products = "CREATE TABLE IF NOT EXISTS Products (" +
+                          "product_id INT AUTO_INCREMENT PRIMARY KEY, " +
+                          "name VARCHAR(255) NOT NULL, " +
+                          "category_id INT NOT NULL, " +
+                          "price DECIMAL(10,2) NOT NULL, " +
+                          "stock_quantity INT DEFAULT 0, " +
+                          "FOREIGN KEY (category_id) REFERENCES Categories(category_id) ON DELETE RESTRICT" +
+                          ") ENGINE=InnoDB";
+
+        String customers = "CREATE TABLE IF NOT EXISTS Customers (" +
+                           "customer_id INT AUTO_INCREMENT PRIMARY KEY, " +
+                           "name VARCHAR(255) NOT NULL, " +
+                           "phone VARCHAR(20)" +
+                           ") ENGINE=InnoDB";
+
+        String orders = "CREATE TABLE IF NOT EXISTS Orders (" +
+                        "order_id INT AUTO_INCREMENT PRIMARY KEY, " +
+                        "customer_id INT, " +
+                        "user_id INT NOT NULL, " +
+                        "total_amount DECIMAL(10,2) NOT NULL, " +
+                        "order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                        "FOREIGN KEY (customer_id) REFERENCES Customers(customer_id) ON DELETE SET NULL, " +
+                        "FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE RESTRICT" +
+                        ") ENGINE=InnoDB";
+
+        String orderItems = "CREATE TABLE IF NOT EXISTS Order_Items (" +
+                            "order_item_id INT AUTO_INCREMENT PRIMARY KEY, " +
+                            "order_id INT NOT NULL, " +
+                            "product_id INT NOT NULL, " +
+                            "quantity INT NOT NULL, " +
+                            "unit_price DECIMAL(10,2) NOT NULL, " +
+                            "FOREIGN KEY (order_id) REFERENCES Orders(order_id) ON DELETE CASCADE, " +
+                            "FOREIGN KEY (product_id) REFERENCES Products(product_id) ON DELETE RESTRICT" +
+                            ") ENGINE=InnoDB";
+
+        String inventory = "CREATE TABLE IF NOT EXISTS Inventory (" +
+                           "inventory_id INT AUTO_INCREMENT PRIMARY KEY, " +
+                           "product_id INT NOT NULL, " +
+                           "transaction_type ENUM('IN','OUT') NOT NULL, " +
+                           "quantity INT NOT NULL, " +
+                           "transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                           "FOREIGN KEY (product_id) REFERENCES Products(product_id) ON DELETE RESTRICT" +
+                           ") ENGINE=InnoDB";
+
+        try (Statement stmt = conn.createStatement()) {
+            stmt.executeUpdate(users);
+            stmt.executeUpdate(categories);
+            stmt.executeUpdate(products);
+            stmt.executeUpdate(customers);
+            stmt.executeUpdate(orders);
+            stmt.executeUpdate(orderItems);
+            stmt.executeUpdate(inventory);
+
+            // Seed a default admin if none exists
+            String check = "SELECT COUNT(*) as cnt FROM Users";
+            try (ResultSet rs = stmt.executeQuery(check)) {
+                int cnt = 0;
+                if (rs.next()) cnt = rs.getInt("cnt");
+                if (cnt == 0) {
+                    String seed = "INSERT INTO Users (username, password, role) VALUES ('admin', 'admin', 'Admin')";
+                    stmt.executeUpdate(seed);
+                    System.out.println("Seeded default admin (username: admin, password: admin)");
+                }
+            }
+
+        } catch (SQLException e) {
+            System.out.println("Error creating tables: " + e.getMessage());
         }
     }
 
@@ -94,14 +191,23 @@ public class DatabaseManager {
 
     public boolean addProduct(String name, int categoryId, double price, int stock) {
         String sql = "INSERT INTO Products (name, category_id, price, stock_quantity) VALUES (?, ?, ?, ?)";
-        
-        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+
+        try (PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             stmt.setString(1, name);
             stmt.setInt(2, categoryId);
             stmt.setDouble(3, price);
             stmt.setInt(4, stock);
-            
-            return stmt.executeUpdate() > 0;
+
+            int affected = stmt.executeUpdate();
+            if (affected > 0) {
+                ResultSet rs = stmt.getGeneratedKeys();
+                if (rs.next()) {
+                    int productId = rs.getInt(1);
+                    if (stock > 0) logInventory(productId, "IN", stock);
+                }
+                return true;
+            }
+            return false;
         } catch (SQLException e) {
             System.out.println("Error: " + e.getMessage());
             return false;
@@ -458,5 +564,65 @@ public SalesStats getSalesStats() {
     }
     
     return new SalesStats(0, 0, 0);
+}
+
+public boolean addCategory(String name) {
+    String sql = "INSERT INTO Categories (name) VALUES (?)";
+    try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+        stmt.setString(1, name);
+        return stmt.executeUpdate() > 0;
+    } catch (SQLException e) {
+        System.out.println("Error adding category: " + e.getMessage());
+        return false;
+    }
+}
+
+public boolean updateCategory(int categoryId, String name) {
+    String sql = "UPDATE Categories SET name = ? WHERE category_id = ?";
+    try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+        stmt.setString(1, name);
+        stmt.setInt(2, categoryId);
+        return stmt.executeUpdate() > 0;
+    } catch (SQLException e) {
+        System.out.println("Error updating category: " + e.getMessage());
+        return false;
+    }
+}
+
+public boolean deleteCategory(int categoryId) {
+    String sql = "DELETE FROM Categories WHERE category_id = ?";
+    try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+        stmt.setInt(1, categoryId);
+        return stmt.executeUpdate() > 0;
+    } catch (SQLException e) {
+        System.out.println("Error deleting category: " + e.getMessage());
+        return false;
+    }
+}
+
+public boolean addUser(String username, String password, String role) {
+    String sql = "INSERT INTO Users (username, password, role) VALUES (?, ?, ?)";
+    try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+        stmt.setString(1, username);
+        stmt.setString(2, password);
+        stmt.setString(3, role);
+        return stmt.executeUpdate() > 0;
+    } catch (SQLException e) {
+        System.out.println("Error adding user: " + e.getMessage());
+        return false;
+    }
+}
+
+public java.util.List<User> getAllUsers() {
+    java.util.List<User> users = new java.util.ArrayList<>();
+    String sql = "SELECT user_id, username, role FROM Users ORDER BY user_id";
+    try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+        while (rs.next()) {
+            users.add(new User(rs.getInt("user_id"), rs.getString("username"), rs.getString("role")));
+        }
+    } catch (SQLException e) {
+        System.out.println("Error fetching users: " + e.getMessage());
+    }
+    return users;
 }
 }
